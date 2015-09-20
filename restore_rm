@@ -1,0 +1,218 @@
+#!/bin/bash
+
+#This script is used to restore files that are accidentally removed with rm.
+#rm aliases to my_rm which moves the files to $TRASH_DIR. This script makes use of
+#the $TRASH_LOG fields for $serial_number and the original directory of the removed
+#file or directory to restore files/directories back to where they were rm'ed from.
+
+#The Directory to store files that are rm'ed and the log file used to keep track of those files.
+TRASH_DIR="$HOME"/rm_trash
+TRASH_LOG="$TRASH_DIR"/rm_log
+TMP_LOG="$TRASH_DIR"/tmp_rm_log
+DELIMITER="__"
+
+#Parse the name of the file to retrieve the serial number.
+#Use awk instead of meddling with IFS, as the latter can lead
+#to problems! Specify the awk delimiter with '-F' and extract
+#the sr. no. (first element).
+get_serial_number()
+{
+  serial_number="`echo "$removed_file" | awk -F "$DELIMITER" '{print $1}' `"
+}
+
+#Get the original path and the line number in the log file for the file/directory that was rm'ed.
+#This is done by searching through the first column ($serial_number) column of the log file
+#for the exact $serial_number. The grep is done so that the line number of the match is displayed.
+#Thus we now know the line number of the entry in the log file. We extract the original path
+#of the file/dir by splitting the log line by '\t' and getting the last element.
+get_original_path_and_log_line_no()
+{
+  #grep options:
+  #-F (to match exactly $serial_number for eg. '1' should
+  #   only match 1, not 10 or 21),
+  #-n (to get the line number in the log file which matches
+  #   the sr. no.),
+  #-x (select only those matches that exactly match the
+  #   whole line).
+  #The result of grep will be <line number>':'<$serial_number>
+  #We extract the line no.(1st field) by using cut delimitted at ':'
+  remove_log_line_no="` cat "$TRASH_LOG" | cut -f1 | grep -Fnx "$serial_number" | cut -f1 -d ":" `"
+
+  #Select that specific line using cat ,head, tail. Then in order to extract
+  #the last field (delimitted by \t), reverse the line, extract the first field
+  #and then reverse that output, so that you have the last field.
+  #While storing entries in the log file, we stored them as:
+  #<Serial Number>'\t'<Time>'\t'<Orignial path of file/dir>.
+  #Hence we split the log line at '\t' and extract the last
+  #element which is the original path.
+  #NOTE: 'cut' splits the line based on TAB by default.
+  orig_path="` cat "$TRASH_LOG" | head "-${remove_log_line_no}" | tail -1 | rev | cut -f1 | rev `"
+}
+
+#Replace the log file with the temporary one which has the new changes.
+replace_with_new_log_file()
+{
+  mv "$TMP_LOG" "$TRASH_LOG"
+  mv_ret2="$?"
+  if [[ "$mv_ret2" -ne 0 ]]						#mv failed, so exit without doing anything else.
+  then
+    echo "Error occurred while replacing log file! mv command failed. Exiting!"
+    exit 1
+  fi
+}
+
+#Rename the remaining files according to the change in the serial numbers made
+#in the log file. We specify the delimiter for awk (-F) and extract the actual
+#file_name part '{print $2}'. Then we decrement the serial number and rename
+#the file accordingly.
+rename_files()
+{
+  orig_name="` ls | grep '^'"$old_serial_number""$DELIMITER"*`"
+  main_name="` echo "$orig_name" | awk -F "$old_serial_number""$DELIMITER" '{print $2}' `"
+  mv "$orig_name" $(($old_serial_number - 1))"$DELIMITER""$main_name"
+  mv_ret1="$?"
+  if [[ "$mv_ret1" -ne 0 ]]						#mv failed, so exit without doing anything else.
+  then
+    echo "Error occurred while renaming remaining files/directories! mv command failed. Exiting!"
+    exit 1
+  fi
+}
+
+#Decrease serial numbers of the entries following the one to be restored.
+#We use 'cut' to get the elements of the line and we decrement the serial
+#number before appending the new_line to the $TMP_LOG.
+#We must ensure consistency between the serial numbers and the file names
+#and hence we must rename the files which correspond to entries after the
+#entry for the file to be restored.
+process_line()
+{
+  old_serial_number="`echo "$line" | cut -f1`"
+  time="`echo "$line" | cut -f2`"
+  original_path="`echo "$line" | cut -f3`"
+
+  new_serial_no=$(( $old_serial_number - 1))
+  new_line="`echo -e "$new_serial_no""\t""$time""\t""$original_path"`"
+  echo -e "$new_line">> "$TMP_LOG"
+  rename_files
+}
+
+#Remove the entry of the restored file from the log and subsequently decrease the
+#serial numbers of entries following this one. Also rename remaining files accordingly.
+#If the current line number is less than the one corresponding to the file to be
+#restored, just append the line to the $TMP_LOG.
+#When the current line is the line corresponding to the file to be restored,
+#we do not append it to the $TMP_LOG, hence it is as good as deleting the entry from
+#the original log (this $TMP_LOG replaces the $TRASH_LOG in the end).
+#For the lines numbers after the one to be removed, we must process the lines to
+#decrement the serial numbers of each successive entry by one.
+remove_entry_from_log()
+{
+  current_log_line_no=0
+  while read line
+  do
+    current_log_line_no=$(( $current_log_line_no + 1 ))
+    if [[ "$current_log_line_no" -lt "$remove_log_line_no" ]]
+    then
+      echo -e "$line">> "$TMP_LOG"
+    elif [[ "$current_log_line_no" -gt "$remove_log_line_no" ]]
+    then
+      process_line
+    fi
+  done < "$TRASH_LOG"
+}
+
+#Used to handle cases when restoring the file fails. For eg. When a file/directory with
+#the same name already exists at the location at which the file/dir is to be restored,
+#or if the location to be restored does not exist (i.e. parent directory also rm'ed).
+#We can either permanently remove such files, or rename them to "failed_"<name>.
+restore_error()
+{
+  echo -e "FAILED to restore file/directory:\t" "$removed_file"
+  while true
+  do
+    read -p "Do you wish to permanently remove "$removed_file" ? Enter [Y/N] :" reply
+    case "$reply" in
+      [Yy]* ) echo -e "Permanently removing\t""$removed_file" "\n"; rm -rf "$removed_file"; break;;
+      [Nn]* ) echo -e "Renaming\t""$removed_file""\tto\tfailed_""$removed_file" "\n"; mv "$removed_file" failed_"$removed_file";break;;
+      *  ) echo "Please answer Y/y/Yes/yes or N/n/No/no." ;;
+    esac
+  done
+  restore_error_flag=1						#Set the flag indicating that an error was encountered while restoring the file/dir.
+}
+
+##############main#################
+if [[ "$#" -eq 0 ]]
+then
+  echo "Enter 1 or more files to be restored!"
+  exit 1
+elif [[ "$PWD" != "$TRASH_DIR" ]] 				#Check that the command is being run from the $TRASH_DIR.
+then
+  echo "Must be in "$TRASH_DIR" for restoring files!"
+  exit 1
+fi
+
+#To ensure that the arguments that are passed are only the files that have names of the type
+#<number>__<something>, since that is the format we use to store the files in the trash.
+#Use the '-q' option with grep so that it is quiet and does not print to stdout.
+#So the array "files_to_be_restored" contains all the valid files which can be restored.
+arg_num=0
+for argument in "$@"
+do
+  echo "$argument" | grep -q '^'[0-9]*'__'*
+  is_valid_file_to_be_restored="$?"
+  if [[ "$is_valid_file_to_be_restored" -eq 0 ]]
+  then
+    files_to_be_restored["$arg_num"]="$argument"
+    arg_num=$(( $arg_num + 1 ))
+  else
+    echo -e "Invalid file :\t""$argument"
+  fi
+done
+
+#Sort the array "files_to_be_restored" (in reverse) such that you process files whose entries are present in the log
+#file later, first. For eg. process the file "5__<name>" before "2__<name1>" etc.
+#This is done since if a file whose entry is present on line 4 of the log is restored first, then the
+#files whose entries are after line 4 will have been renamed to reflect the decrease in serial number. Thus,
+#if such a file is also given as input in a later argument, the name will not match.
+#To avoid this problem, we sort the input filenames such that the ones appearing later in the log file
+#i.e. the ones with larger serial numbers are restored before the ones appearing before in the log file
+#i.e. the ones with smaller serial numbers.
+files_to_be_restored=($(for file in "${files_to_be_restored[@]}"
+do
+  echo "$file"
+done | sort -nr ))						#Sort in reverse (-r)
+
+for removed_file in "${files_to_be_restored[@]}"
+do
+  restore_error_flag=0						#Unset the flag used to indicate error while restoring the file/dir.
+  #Check that the file/directory given as input is present in $TRASH_DIR, Or if not, then (i.e. softlink that
+  #points to a file which is not within $TRASH_DIR) check that the file is a softlink.
+  if [[ -e "$removed_file" ]] || ( [[ ! -e "$removed_file" ]] && [[ -h "$removed_file" ]] )
+  then
+    get_serial_number
+    get_original_path_and_log_line_no
+    if [[ -f "$orig_path" ]] || [[ -d "$orig_path" ]] 		#Check if that file/directory already exists at that path. If it does, go to restore_error.
+    then
+      echo -e "\nFile/Directory of the same name already exists!"
+      restore_error
+    else
+      mv "$removed_file" "$orig_path"				#Restore the file/directory back to where it was before it was rm'ed.
+      mv_ret0="$?"
+      if [[ "$mv_ret0" -ne 0 ]] 				#mv failed. Probably because the directory it was originally in, no longer exists.
+      then
+	echo -e "\nmv failed. Probably because destination directory does not exist!"
+        restore_error
+      fi
+    fi
+    remove_entry_from_log
+    replace_with_new_log_file
+  else
+    echo "File/Directory does not exist!"
+    echo -e "FAILED to restore file/directory:\t" "$removed_file\n"
+    continue							#Skip the rest of this particular loop iteration. Move on to the next argument.
+  fi
+  if [[ "$restore_error_flag" -eq 0 ]]
+  then
+    echo -e "Successfully restored the following file:\t" "$removed_file"
+  fi
+done

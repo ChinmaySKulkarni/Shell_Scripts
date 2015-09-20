@@ -1,0 +1,159 @@
+#!/bin/bash
+
+#This script is used to avoid disaster in case rm is accidentally done for a file or directory you
+#do not want to remove.
+
+#The Directory to store files that are rm'ed and the log file used to keep track of those files.
+TRASH_DIR="$HOME"/rm_trash
+TRASH_LOG="$TRASH_DIR"/rm_log
+DELIMITER="__"
+
+#This function retrieves the last serial number from the $TRASH_LOG and increments it by 1
+#The serial number is used to map to the original location of a file, even when files
+#with the same name are rm'ed from different locations, or if files of the same name are
+#rm'ed from the same location at different times.
+update_serial_number()
+{
+  serial_number="`cat "$TRASH_LOG" | tail -1 | awk '{ print $1 }'`"	#Get the serial number corresponding to the last rm (last row, first column).
+  serial_number=$(($serial_number + 1))
+}
+
+#This function is used to remove dots and slashes from the supplied file names. Eg:
+#This function is used to replace slashes from the supplied file names to pipes '|'.
+#Eg. if a command like rm /home/chinmay/foo is fired, the $file variable will contain
+#slashes. While mv'ing to the $TRASH_DIR, we will face a problem as file names cannot
+#contain slashes. Thus we replace all slashes with pipes. Spaces are replaced by underscores.
+replace_slashes_spaces_filename()
+{
+  mod_file_name="`sed 's/\//|/g' <<< "$file"`"				#'<<<' is to tell sed to accept a string input (here-string) instead of a file name.
+  mod_file_name="`sed 's/ /_/g' <<< "$mod_file_name"`"
+}
+
+#This function is used to check the permissions of each file/directory which is given as an argument to safe_rm.
+#If the '-f' option is given, this function is not called.
+#We use 'stat' to display file status. '-f' is used to specify the format. '%A' specifies that the access rights
+#be displayed in octet form. We then check the 3rd bit (only one bit) i.e. :0:1. If that bit is '2', '3', '6' or '7'
+#then this means that the file has write permissions.
+#If the user has write permissions over the file then the function returns and the remaining execution of safe_rm
+#for that file continues (mv, logging, renaming, etc.). If the user does not have write permissions over the file,
+#then the user is asked whether to continue with the safe_removal of that file, or not.
+#
+#NOTE:
+#We do not check for write permissions using if [[ -w "$file" ]] because if the "$file" argument is a softlink,
+#then if [[ -w "$file" ]] will not check that file but the file that the softlink points to.
+check_if_write_protected()
+{
+  permissions="`stat -f %A "$file" `"
+  write_permission_bit="${permissions:0:1}"
+  if [[ "$write_permission_bit" == '2' ]] || [[ "$write_permission_bit" == '3' ]] || [[ "$write_permission_bit" == '6' ]] || [[ "$write_permission_bit" == '7' ]]
+  then
+    return 0
+  else
+    read -p "safe_rm: Remove write-protected file/directory '"$file"' ? " response
+    case "$response" in
+      [Yy]* ) return 0; break;;						#Continue with safe_rm.
+      * ) echo -e "safe_rm: Skipped the file/directory '"$file"'.\n";return 1; break;;
+    esac								#Skip the file.
+  fi
+}
+
+##############main#################
+if [[ "$#" -eq 0 ]]
+then
+  echo "Enter 1 or more files to be removed!"
+  exit 1
+fi
+
+force_option=0								#This variable indicates whether the '-f' (force) option has been given as input.
+for argument in "$@"
+do
+  if [[ "${argument:0:1}" == '-' ]]					#If the first character of the string "argument" is a '-' (as in an option), then only check for
+  then									#the 'f' option in that string (argument).i.e can also be like -rf , not just -f.
+    echo "$argument" | grep -Fq 'f'					#'-F' to find only the specified pattern and '-q' for quiet grep.
+    if [[ "$?" == 0 ]]
+    then
+      force_option=$(($force_option + 1 )) 				#Increment the force_option variable if the grep was successful.
+    fi
+  fi
+done
+
+for file in "$@"
+do
+  #The below check is not exhaustive, but covers most options that are generally used.
+  if [[ "${file:0:1}" == '-' ]]
+  then
+    if [ "$file" != "-f" ] && [ "$file" != "-r" ] && [ "$file" != "-R" ] && [ "$file" != "-rf" ] && [ "$file" != "-fr" ] &&
+       [ "$file" != "-Rf" ] && [ "$file" != "-fR" ]
+    then
+      echo -e "Skipping the file:\t"$file"\nTry 'rm ./"$file" ' to remove the file "$file" "
+    fi
+    continue
+  fi
+
+  if [[ -e "$file" ]] 							#Check that the argument passed is a file or directory which exists.
+  then									#If a softlink is passed, this also checks that the directory the softlink points to exists.
+    if [[ "$force_option" -eq 0 ]]
+    then
+      check_if_write_protected
+      if [[ "$?" == 1 ]]						#If the permissions/user input after asking do not permit the removal of that file, skip it.
+      then
+        continue
+      fi
+    fi
+    #If the argument is a softlink then we don't get the file_location using greadlink -f, as that will
+    #yield the actual file that the softlink points to rather than the softlink itself. Thus, we rm the
+    #softlink rather than the file/directory that the softlink points to. Accordingly, we also store the
+    #name of the softlink in the log file rather than the name of the file it points to. Another advantage
+    #is that, when we restore the softlink (shortcut) then that file is restored rather than the file that
+    #it points to.
+    if [[ -h "$file" ]]							#'-h' is used to test whether the input file is a softlink.
+    then
+      echo "$file" | grep -Fq '/'					#If '/' exists in the argument then we find the absolute path for the softlink.
+      if [[ "$?" == 0 ]]
+      then
+        link_name="`echo "$file" | awk -F '/' '{print $NF}' `"		#$NF is the last field.
+        relative_dir_to_pwd="`echo "$file" | awk -F "$link_name" '{print $1}'`"
+        actual_dir_location="`greadlink -f "$relative_dir_to_pwd" `"
+        file_location="$actual_dir_location"/"$link_name"
+      else
+        file_location="$PWD"/"$file"					#If '/' does not exist in the argument then the softlink is in the "$PWD".
+      fi
+    else								#If it is not a softlink then get its absolute path.
+      file_location="` greadlink -f "$file" `"
+    fi
+    if [[ "$file_location" == "$TRASH_DIR" ]] 				#Do not allow rm for the rm_trash directory.
+    then
+      echo -e "Cannot remove "$TRASH_DIR" !\n"
+      continue
+    fi
+    if [[ "$file_location" == "$TRASH_LOG" ]] 				#Do not allow rm for the log file.
+    then
+      echo -e "Cannot remove "$TRASH_LOG" (Log file used by safe_rm)!\n"
+      continue
+    fi									#Do not allow rm for root directory '/' and $HOME directory.
+    if [[ "$file_location" == '/' ]] || [[ "$file_location" == "$HOME" ]]
+    then
+      echo -e "Cannot remove "$file_location" Will lead to disaster!\n"
+      continue
+    fi
+    update_serial_number
+    replace_slashes_spaces_filename
+    new_file_name="$serial_number""$DELIMITER""$mod_file_name"		#Construct the new file name as <Sr.No>__<modified_file_name>.
+    mv "$file" "$TRASH_DIR"/"$new_file_name"				#mv the file or directory to the user-defined trash directory $TRASH_DIR.
+    mv_ret="$?"
+    if [[ "$mv_ret" -ne 0 ]]						#mv failed, so exit without doing anything else.
+    then
+      echo -e "mv command failed. Unable to send the following file/directory to trash:\t""$file\n"
+      continue
+    fi
+    time=` date`							#Append to the log file for each rm: Sr. No. , time of rm, original location of file/directory.
+    echo -e "$serial_number""\t""$time""\t""$file_location">> "$TRASH_LOG"
+  elif [[ -h "$file" ]] 						#The argument is a link to a file/directory which does not exist.
+  then
+    echo -e "The file:\t"$file"\tis a link to a file that does not exist. Permanently removing\t"$file""
+    rm -rf "$file"							#Remove the file without logging.
+  else									#The file (non-softlink file) does not exist.
+    echo -e "File:\t""$file""\tdoes not exist!"
+    continue
+  fi
+done

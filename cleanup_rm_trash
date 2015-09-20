@@ -1,0 +1,49 @@
+#!/bin/bash
+
+#This script is used to clean out the $TRASH_DIR and subsequently reinitialize the
+#$TRASH_LOG. The user is prompted to exit from the script in case he wants to
+#restore files. If he does not want to restore any files, then all the files
+#present in the $TRASH_DIR are permanently removed.
+TRASH_DIR="$HOME"/rm_trash
+TRASH_LOG="$TRASH_DIR"/rm_log
+SLEEP_TIME="180"								#Default value of SLEEP.
+
+#Permanently remove the files in $TRASH_DIR.
+#Reinitialize $TRASH_LOG.
+cleanup()
+{
+  rm -rf "$TRASH_DIR"/*
+  echo 0 > "$TRASH_LOG"
+  echo "cleanup_rm_trash script completed!"
+}
+
+#Sleep for $SLEEP_TIME and again ask the user if more time is required
+#for restoring files. If yes, sleep again. If no, break,return to the while loop
+#at the initial caller for "sleep_timer", break and go to the "cleanup" function.
+#Similarly, if you select "Yes" to call the "sleep_timer" function again...
+sleep_timer()
+{
+  echo "Sleeping for \"$SLEEP_TIME\" seconds!"
+  sleep "$SLEEP_TIME"
+  while true
+  do
+    read -p "Need more time to restore the required files?" sleep_more
+    case "$sleep_more" in
+      [Yy]* ) sleep_timer;break;;			#Sleep for more time.
+      [Nn]* ) break;;  								#Continuing with the cleanup script.
+    esac
+  done
+}
+
+##############main#################
+#Go to the sleep_timer function in case the user wants to restore some files.
+#If the user does not want to restore any files then cleanup directly.
+while true
+do
+  read -p "Do you want to restore any files?" yn
+  case "$yn" in
+    [Yy]* ) sleep_timer;break;;				#The program sleeps while the user "restores" required files.
+    [Nn]* ) break;;  								  #Continuing with the cleanup script.
+  esac
+done
+cleanup
