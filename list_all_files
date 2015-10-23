@@ -1,0 +1,6 @@
+#!/bin/bash
+#This script is used to get the list of all files in the current directory including all the files in the sub-directories.
+ls -R . | awk '
+/:$/&&f{s=$0;f=0}
+/:$/&&!f{sub(/:$/,"");s=$0;f=1;next}
+NF&&f{ print s"/"$0 }'
